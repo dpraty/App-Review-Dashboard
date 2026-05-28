@@ -4,7 +4,7 @@ from google_play_scraper import Sort, reviews
 from supabase import create_client, Client
 
 # 1. Pipeline Settings
-APP_ID = "com.spotify.music"
+APP_ID = "com.tinder"
 BATCH_SIZE = 50
 
 # 2. Dynamic Environment Variables
