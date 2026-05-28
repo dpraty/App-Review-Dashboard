@@ -7,10 +7,14 @@ from supabase import create_client, Client
 APP_ID = "com.spotify.music"
 BATCH_SIZE = 50
 
-# 2. Hardcoded Credentials for Local Testing
-# (Later we will move these to read from Environment Variables for GitHub Actions)
-SUPABASE_URL = "https://jzzknnbilyblwgqaawam.supabase.co"
-SUPABASE_KEY = "sb_publishable_b8zS9YyZAPFcwqiqMk5oFw__3sjEh6H"
+# 2. Dynamic Environment Variables
+# This looks for variables set by your machine or GitHub actions.
+# If it can't find them, it defaults to an empty string.
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+
+print("Initializing connection to Supabase via Service Role...")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 print("Initializing connection to Supabase...")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)

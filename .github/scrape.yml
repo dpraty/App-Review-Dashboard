@@ -1,0 +1,33 @@
+name: Run Play Store Scraper Daily
+
+on:
+  schedule:
+    # Runs everyday at midnight UTC (5:30 AM IST)
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    # This button allows you to manually trigger the script from GitHub anytime to test it
+
+jobs:
+  scrape-and-stream:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository Code
+      uses: actions/checkout@v4
+
+    - name: Set up Python Runtime
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install google-play-scraper supabase
+
+    - name: Execute Scraper Script
+      env:
+        # This securely injects your GitHub Secrets into the runner environment
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      run: python scraper.py
