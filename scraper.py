@@ -1,64 +1,169 @@
 import os
-from datetime import datetime
-from google_play_scraper import Sort, reviews
+import time
+import logging
+from datetime import datetime, timedelta
+from google_play_scraper import Sort, reviews, app
 from supabase import create_client, Client
 
-# 1. Pipeline Settings
-APP_ID = "com.tinder"
-BATCH_SIZE = 50
+# ==========================================
+# 1. PIPELINE CONFIGURATION & SETUP
+# ==========================================
+# Replaced standard print() with standard Python logging for better GitHub Actions tracking
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
-# 2. Dynamic Environment Variables
-# This looks for variables set by your machine or GitHub actions.
-# If it can't find them, it defaults to an empty string.
+TARGET_APPS = {
+    "Spotify": "com.spotify.music",
+    "YouTube Music": "com.google.android.apps.youtube.music",
+    "Apple Music": "com.apple.android.music",
+    "Amazon Music": "com.amazon.mp3",
+}
+
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
-print("Initializing connection to Supabase via Service Role...")
+logging.info("Initializing connection to Supabase via Service Role...")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-print("Initializing connection to Supabase...")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Define the absolute 30-day cutoff boundary
+# Note: google-play-scraper returns naive datetimes. GitHub Actions runs in UTC by default.
+CUTOFF_DATE = datetime.now() - timedelta(days=30)
+CUTOFF_ISO = CUTOFF_DATE.isoformat()
 
-print(f"Fetching latest {BATCH_SIZE} reviews for {APP_ID}...")
-scraped_reviews, _ = reviews(
-    APP_ID, lang="en", country="us", sort=Sort.NEWEST, count=BATCH_SIZE
-)
+# ==========================================
+# 2. INGESTION & DATA SYNC LOOP
+# ==========================================
+for app_name, app_id in TARGET_APPS.items():
+    logging.info(f"========== Processing {app_name} ({app_id}) ==========")
 
-print(f"Found {len(scraped_reviews)} raw records. Formatting data fields...")
+    # ---- PHASE 1: SYNC THE GLOBAL UNIVERSE MASTER METADATA ----
+    try:
+        logging.info(f"Fetching global storefront metadata for {app_name}...")
+        meta = app(app_id, lang="en", country="us")
 
-# 3. Transform the data to match your database schema
-db_records = []
-for r in scraped_reviews:
-    # Convert string datetime data into standard ISO formats
-    review_date = r.get("at")
-    iso_date = (
-        review_date.isoformat()
-        if isinstance(review_date, datetime)
-        else str(review_date)
+        universe_data = {
+            "app_id": app_id,
+            "app_name": app_name,
+            "overall_rating": float(meta.get("score", 0)),
+            "total_reviews": int(meta.get("reviews", 0)),
+            "updated_at": datetime.now().isoformat(),
+        }
+
+        supabase.table("app_universe").upsert(universe_data).execute()
+        logging.info(
+            f"Success! Updated universe metrics (Global Avg: {universe_data['overall_rating']})"
+        )
+
+    except Exception as e:
+        logging.error(f"[METADATA ERROR] Failed to sync universe for {app_name}: {e}")
+
+    # ---- PHASE 2: INCREMENTAL PAGINATION FOR ROLLING REVIEWS ----
+    logging.info(f"Initiating review scrape for {app_name}...")
+    continuation_token = None
+    total_upserted = 0
+
+    # 1. FETCH THE HIGH-WATER MARK FROM SUPABASE
+    # We ask the DB: What is the most recent review_date for this specific app?
+    latest_record = (
+        supabase.table("app_reviews")
+        .select("review_date")
+        .eq("app_id", app_id)
+        .order("review_date", desc=True)
+        .limit(1)
+        .execute()
     )
 
-    record = {
-        "reviewId": r.get("reviewId"),  # Text primary key
-        "app_id": APP_ID,  # Text identification
-        "review_text": r.get("content"),  # Text content
-        "rating": int(r.get("score")),  # Integer rating
-        "app_version": r.get("reviewCreatedVersion", "N/A"),  # Text version indicator
-        "likes": int(r.get("thumbsUpCount", 0)),  # Integer count
-        "review_date": iso_date,  # Timestamp with timezone
-    }
-    db_records.append(record)
-
-# 4. Push the formatted batch to Supabase
-if db_records:
-    print(f"Streaming {len(db_records)} records to Supabase tables...")
-    try:
-        # .upsert() inserts new rows, or skips if the 'id' already exists
-        response = supabase.table("app_reviews").upsert(db_records).execute()
-        print("Pipeline Execution Complete! Data successfully streamed.")
-    except Exception as e:
-        print(f"\n[CRITICAL ERROR] Failed to push to Supabase: {e}")
-        print(
-            "Verify your table columns exactly match the dictionary keys used in this script."
+    # 2. SET THE DYNAMIC CUTOFF
+    if latest_record.data:
+        # We have existing data! Set the cutoff to our newest existing review.
+        db_date_str = latest_record.data[0]["review_date"].replace("Z", "+00:00")
+        dynamic_cutoff = datetime.fromisoformat(db_date_str).replace(tzinfo=None)
+        logging.info(
+            f"Existing data found. Incremental sync cutoff set to: {dynamic_cutoff}"
         )
-else:
-    print("Zero records found to process.")
+    else:
+        # First run, or paused project with an empty DB. Fallback to 30 days.
+        dynamic_cutoff = CUTOFF_DATE
+        logging.info(
+            f"No existing data. Full 30-day sync cutoff set to: {dynamic_cutoff}"
+        )
+
+    # 3. THE SMART LOOP
+    while True:
+        try:
+            scraped_reviews, continuation_token = reviews(
+                app_id,
+                continuation_token=continuation_token,
+                lang="en",
+                country="us",
+                sort=Sort.NEWEST,
+                count=200,
+            )
+
+            db_records = []
+            reached_cutoff = False
+
+            for r in scraped_reviews:
+                review_date = r.get("at")
+
+                # THE BREAK CONDITION: Stop if we hit a review older than our dynamic cutoff
+                if review_date <= dynamic_cutoff:
+                    reached_cutoff = True
+                    break
+
+                db_records.append(
+                    {
+                        "id": r.get("reviewId"),
+                        "app_id": app_id,
+                        "review_text": r.get("content"),
+                        "rating": int(r.get("score")),
+                        "app_version": r.get("reviewCreatedVersion", "N/A"),
+                        "thumbs_up": int(r.get("thumbsUpCount", 0)),
+                        "review_date": review_date.isoformat(),
+                    }
+                )
+
+            if db_records:
+                supabase.table("app_reviews").upsert(db_records).execute()
+                total_upserted += len(db_records)
+                logging.info(f"  ... Upserted batch of {len(db_records)} new records.")
+
+            if reached_cutoff:
+                logging.info(
+                    f"Reached existing data boundary for {app_name}. Sync complete."
+                )
+                break
+            if not continuation_token:
+                logging.info(
+                    f"Reached the absolute end of Play Store reviews for {app_name}."
+                )
+                break
+
+            time.sleep(1.5)
+
+        except Exception as e:
+            logging.error(
+                f"[REVIEW ERROR] Failure during pagination for {app_name}: {e}"
+            )
+            break
+
+    logging.info(f"Finished {app_name}. Total new reviews processed: {total_upserted}")
+
+# ==========================================
+# 3. ROLLING WINDOW DATA RETENTION POLICY (TTL)
+# ==========================================
+logging.info("\n========== Executing Data Retention Policy ==========")
+logging.info(f"Purging all database reviews strictly older than: {CUTOFF_ISO}")
+
+try:
+    purge_action = (
+        supabase.table("app_reviews").delete().lt("review_date", CUTOFF_ISO).execute()
+    )
+    logging.info(
+        "Success! Historical stragglers cleanly purged from app_reviews table."
+    )
+except Exception as e:
+    logging.error(f"[RETENTION ERROR] Data purge failed: {e}")
+
+logging.info("Pipeline Task Execution Complete!")
