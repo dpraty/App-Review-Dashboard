@@ -3,7 +3,7 @@ name: Run Play Store Scraper Daily
 on:
   schedule:
     # Runs everyday at midnight UTC (5:30 AM IST)
-    - cron: '0 0 * * *'
+    - cron: '30 4 * * *'
   workflow_dispatch:
     # This button allows you to manually trigger the script from GitHub anytime to test it
 
