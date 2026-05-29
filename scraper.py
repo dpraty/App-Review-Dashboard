@@ -114,12 +114,12 @@ for app_name, app_id in TARGET_APPS.items():
 
                 db_records.append(
                     {
-                        "id": r.get("reviewId"),
+                        "reviewId": r.get("reviewId"),
                         "app_id": app_id,
                         "review_text": r.get("content"),
                         "rating": int(r.get("score")),
                         "app_version": r.get("reviewCreatedVersion", "N/A"),
-                        "thumbs_up": int(r.get("thumbsUpCount", 0)),
+                        "likes": int(r.get("thumbsUpCount", 0)),
                         "review_date": review_date.isoformat(),
                     }
                 )
